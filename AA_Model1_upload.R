@@ -14,14 +14,10 @@
 #####################################################################
 #####################################################################
 
-
-#setwd("")
-
 ## call the libraries that are needed for analysis
-
-library(MASS)
-library(compiler)
-library(binom)
+pacman::p_load("here", "MASS", "compiler", 
+               "binom", "coda", "readr", 
+               "janitor", "tidyverse", "assertr")
 
 ###############################################
 ###############################################
@@ -38,67 +34,119 @@ library(binom)
 ###############################################
 ## 0.1 Read in data
 
-data <- read.csv("", header = TRUE)  					 ## call in the csv datafile that needs to be analysed 
+# creates a list of all filepaths to data to be read into the script, being explicit about which file you're using with paths
+# this script can be scaled to accomodate as many files as you have
+files <- list(
+  file1 = here("/model/input/file1.csv"),
+  file2 = here("/model/input/file2.csv"),
+  file3 = here("/model/input/file3.csv"),
+  file4 = here("/model/input/file4.csv")
+  )
 
-head(data)						 						 ## check that the data has been read in correctly 
+# use a unit test to check your list has the number of files you're expecting to call and none are missing
+stopifnot(length(files) == 4 & is.na(files) == FALSE)
 
-#data <- data[",]										 ## You may need to subset data from the dataframe
+# create a list of all files as connections
+fileslist <- list(files$file1, files$file2, files$file3, files$file4)
 
-data_2 <- as.data.frame(cbind(data$age, data$conc))
+# use a unit test to check your list has the number of files you're expecting to call and none are missing
+stopifnot(length(fileslist) == 16 & is.na(fileslist) == FALSE)
 
-data_3 <- na.omit(data_2) 								## make sure there are no NAs
+# create a list called dfs, (lines 63-78)
+# the list holds all 4 dataframes created from csvs and cleans up their column titles to be R friendly (lines 68-69)
+# use unit tests to check the dataframes look as you expect them to look with
+# the right variables and dimensions (lines 71-76)
+dfs <- lapply(fileslist, function(x) {
+  
+  x_df <- as.data.frame(read_csv(x, col_names = TRUE, na = "NA")) %>%
+  clean_names()
+  
+  x_df  %>%
+    verify(ncol(x_df) == 3) %>%
+    verify(is.na(x_df) == FALSE) %>%
+    transmute(age = age, 
+              titre = titre, 
+              sero_pos = sero_pos)
+})
 
-AB_data <- data_3										## assign the object to a new name that will be evalauated by the function
+# add names for each df in the list corresponding to appropriate names for each
+# spreadheet, in this case the test and the country it was performed in
+# use names without spaces as these will become the file names for your exported estimates
 
-###############################################
-## 0.2 bin the data by age group to plot
+df_names <- c("test1_country1", "test2_country1", "test1_country2", "test2_country2")
 
-age_bins <- c(0, 5, 10, 15, 20, 25, 30, 35, 40, 50, 60, 70, 80, 90)							 ## age bins will be set from the youngest age group
-age_bins_mid <- 0.5*( age_bins[1:(length(age_bins)-1)] + age_bins[2:length(age_bins)] )		 ## in your data to the maximum age by = user defined
+names(dfs) <- df_names
 
-###############################################
-## 0.2 Prepare data for plotting
+## using dfs, we extract each df,run it through the model, 
+## and save and export result to the plot task ##
 
+### calculate observed age seroprevalence ###
 
-N_bins <- length(age_bins) - 1 
+# loop though 4 datasets to calculate observed age seroprevalence
+# start i loop 
+for (i in seq_along(dfs)){
+	
+  # set seed for reproducibility of results
+  set.seed(22315)            
+  seed = 22315
+  
+  #messages for the user to keep them aware of model progress
+  start_time <- Sys.time()
+  print(paste0("Age seroprevalence calculation for dataset ",names(dfs)[i]," has now begun..."))
+  
+  df <- as.data.frame(pluck(dfs, i))
+  
+  # age bin the data for plotting
+  age_bins <- seq(from=0, to=9, by=1)
+  age_bins_mid <- seq(from=0.5, to=8.5, by=1) 
+  
+  N_bins <- length(age_bins) - 1
+      
+  # initialize empty dataframe to fill with binomial confidence intervals
+  # from observed data 
+  sp_bins <- data.frame(med = numeric(0), 
+                        low_95 = numeric(0), 
+                        high_95 = numeric(0))
+  
+  # loop thorugh data to populate the sp_bins into a 9x3 matrix
+  # containing observed age seroprevalence proportions for each age group and
+  # 95% confidence intervals
+  # start k loop
+      for(k in 1:N_bins){
+        
+        index <- which(df[,1]> age_bins[k] & df[,1]<=age_bins[k+1])
+          
+        temp  <- df[index,3]
+        
+        sp_bins[k,] <- as.numeric(as.vector(binom.confint(sum(temp), 
+                                                            length(temp),
+                                                            method="wilson",
+                                                            seed = seed)[1,4:6]))
+        } # close k loop
 
+  # create a new column called age from the row numbers to join with 
+  # age bin data
 
-GMT_bins      <- rep(NA, N_bins)
+  sp_bins <-as.data.frame(sp_bins) %>%
+    mutate(age = as.numeric(row.names(sp_bins)))
 
-AB_range_bins <- matrix(NA, nrow=N_bins, ncol=3)						## generate an empty matrix to be filled with antibody levels for each age bin and the binomial CIs 
-colnames(AB_range_bins) <- c("med", "low", "high")
-
-for(i in 1:N_bins)
-{
-	index <- intersect( which(AB_data[,1]>age_bins[i]), which(AB_data[,1]<=age_bins[i+1]) ) 
-	temp  <- AB_data[index,2]
-
-	GMT_bins[i] = exp(mean(log(temp)))
-
-	AB_range_bins[i,] <- quantile( temp, prob=c(0.5, 0.025, 0.975) )
-}
-
-
-###############################################
-## 0.3 Plot data
- 
-par(mfrow=c(1,1))
-
-plot(x=age_bins_mid, y=GMT_bins, 
-pch=15, cex=2,
-log="y", xlim=c(0,90), ylim=c(0.1,100),
-xlab="age (years)", ylab="Geometric mean antibody titre", 
-main="Cross-sectional antibody data"  )
-
-
-for(i in 1:N_bins)
-{
-	arrows(x0=age_bins_mid[i], y0=AB_range_bins[i,2], 
-             x1=age_bins_mid[i], y1=AB_range_bins[i,3], 
-             length=0.03, angle=90, code=3, col="black", lwd=1)	
-}
-
-
+  #check that no data are missing 
+  stopifnot(not_na(sp_bins) == TRUE)
+    
+  # create country and test specific age bin data frame
+  age_bins <- as.data.frame(age_bins_mid) %>%
+    filter(age_bins_mid != 9.5) %>%
+    mutate(age = as.numeric(sp_bins$age))
+  
+  #merge observed prevalence proprtions, confidence intervals, age bins and age 
+  # can export this for plotting in tidyverse
+  obs<- left_join(sp_bins, age_bins, by = "age") %>%
+    mutate(age = as.numeric(sp_bins$age))
+  
+  #message to let the user know that each iteration has completed
+  print(paste0("Age seroprevalence for dataset ",names(dfs)[i]," has completed successfully."))
+  
+} # close i loop
 
 ###################################################
 ###################################################
